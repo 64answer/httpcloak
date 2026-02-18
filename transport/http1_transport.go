@@ -3,17 +3,18 @@ package transport
 import (
 	"bufio"
 	"context"
-	tls "github.com/sardanioss/utls"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
-	http "github.com/sardanioss/http"
 	"net/textproto"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	http "github.com/sardanioss/http"
+	tls "github.com/sardanioss/utls"
 
 	"github.com/sardanioss/httpcloak/dns"
 	"github.com/sardanioss/httpcloak/fingerprint"
@@ -185,11 +186,11 @@ func (t *HTTP1Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			// Wrap the body to handle connection lifecycle
 			// Connection will be returned to pool or closed when body is fully read
 			resp.Body = &pooledBodyWrapper{
-				body:        resp.Body,
-				conn:        conn,
-				key:         key,
-				transport:   t,
-				keepAlive:   t.shouldKeepAlive(req, resp),
+				body:      resp.Body,
+				conn:      conn,
+				key:       key,
+				transport: t,
+				keepAlive: t.shouldKeepAlive(req, resp),
 			}
 			return resp, nil
 		}
@@ -211,11 +212,11 @@ func (t *HTTP1Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	// Wrap the body to handle connection lifecycle
 	resp.Body = &pooledBodyWrapper{
-		body:        resp.Body,
-		conn:        conn,
-		key:         key,
-		transport:   t,
-		keepAlive:   t.shouldKeepAlive(req, resp),
+		body:      resp.Body,
+		conn:      conn,
+		key:       key,
+		transport: t,
+		keepAlive: t.shouldKeepAlive(req, resp),
 	}
 
 	return resp, nil
@@ -493,9 +494,18 @@ func (t *HTTP1Transport) createConn(ctx context.Context, host, port, scheme stri
 			KeyLogWriter:                       keyLogWriter,
 		}
 
-		// For HTTP/1.1 transport, use ClientHelloID directly
-		// Note: ClientHelloID includes ALPN with [h2, http/1.1], so we must modify it
-		tlsConn := utls.UClient(rawConn, tlsConfig, t.preset.ClientHelloID)
+		// For HTTP/1.1 transport, use ClientHelloID or Custom Spec if available
+		var tlsConn *utls.UConn
+		if t.preset.CustomClientHelloSpec != nil {
+			tlsConn = utls.UClient(rawConn, tlsConfig, utls.HelloCustom)
+			if err := tlsConn.ApplyPreset(t.preset.CustomClientHelloSpec()); err != nil {
+				rawConn.Close()
+				return nil, NewTLSError("apply_preset", host, port, "h1", err)
+			}
+		} else {
+			// Note: ClientHelloID includes ALPN with [h2, http/1.1], so we must modify it
+			tlsConn = utls.UClient(rawConn, tlsConfig, t.preset.ClientHelloID)
+		}
 		tlsConn.SetSessionCache(t.sessionCache)
 
 		// Build handshake state first - this populates Extensions from ClientHelloID

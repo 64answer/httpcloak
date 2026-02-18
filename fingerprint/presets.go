@@ -53,16 +53,21 @@ type HeaderPair struct {
 
 // Preset represents a browser fingerprint configuration
 type Preset struct {
-	Name              string
-	ClientHelloID     tls.ClientHelloID // For TCP/TLS (HTTP/1.1, HTTP/2)
-	PSKClientHelloID  tls.ClientHelloID // For TCP/TLS with PSK (session resumption)
-	QUICClientHelloID tls.ClientHelloID // For QUIC/HTTP/3 (different TLS extensions)
+	Name                 string
+	ClientHelloID        tls.ClientHelloID // For TCP/TLS (HTTP/1.1, HTTP/2)
+	PSKClientHelloID     tls.ClientHelloID // For TCP/TLS with PSK (session resumption)
+	QUICClientHelloID    tls.ClientHelloID // For QUIC/HTTP/3 (different TLS extensions)
 	QUICPSKClientHelloID tls.ClientHelloID // For QUIC/HTTP/3 with PSK (session resumption)
-	UserAgent         string
-	Headers           map[string]string // For backward compatibility
-	HeaderOrder       []HeaderPair      // Ordered headers for HTTP/2 and HTTP/3
-	HTTP2Settings     HTTP2Settings
-	SupportHTTP3      bool
+
+	// Optional custom specs for precise fingerprinting (bypasses default ID lookup)
+	CustomClientHelloSpec     func() *tls.ClientHelloSpec // For TCP
+	CustomQUICClientHelloSpec func() *tls.ClientHelloSpec // For QUIC
+
+	UserAgent     string
+	Headers       map[string]string // For backward compatibility
+	HeaderOrder   []HeaderPair      // Ordered headers for HTTP/2 and HTTP/3
+	HTTP2Settings HTTP2Settings
+	SupportHTTP3  bool
 }
 
 // HTTP2Settings contains HTTP/2 connection settings
@@ -230,6 +235,72 @@ func Firefox133() *Preset {
 			StreamExclusive:        false,
 		},
 		SupportHTTP3: false, // No Firefox QUIC fingerprint in utls
+	}
+}
+
+// Firefox147 returns the Firefox 147 fingerprint preset
+func Firefox147() *Preset {
+	p := GetPlatformInfo()
+
+	// Construct User-Agent based on platform
+	var ua string
+	switch p.Platform {
+	case "Windows":
+		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0"
+	case "macOS":
+		ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X " + p.PlatformVersion + "; rv:147.0) Gecko/20100101 Firefox/147.0"
+	default:
+		ua = "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0"
+	}
+
+	return &Preset{
+		Name:              "firefox-147",
+		ClientHelloID:     tls.HelloFirefox_120, // Fallback
+		QUICClientHelloID: tls.HelloFirefox_120, // Fallback
+
+		// Custom specs for exact fingerprint matching
+		CustomClientHelloSpec:     getFirefox147Spec,
+		CustomQUICClientHelloSpec: getFirefox147QUICSpec,
+
+		UserAgent: ua,
+		Headers: map[string]string{
+			"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+			"Accept-Language":           "en-US,en;q=0.9",
+			"Accept-Encoding":           "gzip, deflate, br, zstd",
+			"Sec-Fetch-Dest":            "document",
+			"Sec-Fetch-Mode":            "navigate",
+			"Sec-Fetch-Site":            "none",
+			"Sec-Fetch-User":            "?1",
+			"Upgrade-Insecure-Requests": "1",
+			"Priority":                  "u=0, i",
+			"Te":                        "trailers",
+		},
+		// Firefox header order for HTTP/2
+		HeaderOrder: []HeaderPair{
+			{"user-agent", ""}, // Placeholder
+			{"accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+			{"accept-language", "en-US,en;q=0.9"},
+			{"accept-encoding", "gzip, deflate, br, zstd"},
+			{"upgrade-insecure-requests", "1"},
+			{"sec-fetch-dest", "document"},
+			{"sec-fetch-mode", "navigate"},
+			{"sec-fetch-site", "none"},
+			{"sec-fetch-user", "?1"},
+			{"priority", "u=0, i"},
+			{"te", "trailers"},
+		},
+		HTTP2Settings: HTTP2Settings{
+			HeaderTableSize:        65536,
+			EnablePush:             true,
+			MaxConcurrentStreams:   0,
+			InitialWindowSize:      131072,
+			MaxFrameSize:           16384,
+			MaxHeaderListSize:      0,
+			ConnectionWindowUpdate: 12517377,
+			StreamWeight:           42,
+			StreamExclusive:        false,
+		},
+		SupportHTTP3: true,
 	}
 }
 
@@ -942,7 +1013,7 @@ func AndroidChrome143() *Preset {
 		PSKClientHelloID:     tls.HelloChrome_143_Linux_PSK, // PSK for session resumption
 		QUICClientHelloID:    tls.HelloChrome_143_QUIC,      // QUIC for HTTP/3
 		QUICPSKClientHelloID: tls.HelloChrome_143_QUIC_PSK,  // QUIC PSK for session resumption
-		UserAgent:        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Mobile Safari/537.36",
+		UserAgent:            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Mobile Safari/537.36",
 		Headers: map[string]string{
 			// Low-entropy Client Hints for mobile
 			"sec-ch-ua":          `"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"`,
@@ -1000,7 +1071,7 @@ func AndroidChrome144() *Preset {
 		PSKClientHelloID:     tls.HelloChrome_144_Linux_PSK,
 		QUICClientHelloID:    tls.HelloChrome_144_QUIC,
 		QUICPSKClientHelloID: tls.HelloChrome_144_QUIC_PSK,
-		UserAgent:        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36",
+		UserAgent:            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36",
 		Headers: map[string]string{
 			"sec-ch-ua":                 `"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"`,
 			"sec-ch-ua-mobile":          "?1",
@@ -1058,6 +1129,7 @@ var presets = map[string]func() *Preset{
 	"chrome-144-linux":   Chrome144Linux,
 	"chrome-144-macos":   Chrome144macOS,
 	"firefox-133":        Firefox133,
+	"firefox-147":        Firefox147,
 	"safari-18":          Safari18,
 	"ios-chrome-143":     IOSChrome143,
 	"ios-chrome-144":     IOSChrome144,
@@ -1071,7 +1143,7 @@ var presets = map[string]func() *Preset{
 	"chrome-latest-windows": Chrome144Windows,
 	"chrome-latest-linux":   Chrome144Linux,
 	"chrome-latest-macos":   Chrome144macOS,
-	"firefox-latest":        Firefox133,
+	"firefox-latest":        Firefox147,
 	"safari-latest":         Safari18,
 	"ios-chrome-latest":     IOSChrome144,
 	"ios-safari-latest":     IOSSafari18,
@@ -1112,4 +1184,140 @@ func AvailableWithInfo() map[string]PresetInfo {
 		result[name] = PresetInfo{Protocols: protocols}
 	}
 	return result
+}
+
+// getFirefox147Spec returns the TCP/TLS ClientHelloSpec for Firefox 147
+func getFirefox147Spec() *tls.ClientHelloSpec {
+	return &tls.ClientHelloSpec{
+		CipherSuites: []uint16{
+			tls.TLS_AES_128_GCM_SHA256,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+			tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+		},
+		CompressionMethods: []uint8{0},
+		Extensions: []tls.TLSExtension{
+			&tls.SNIExtension{},
+			&tls.ExtendedMasterSecretExtension{},
+			&tls.RenegotiationInfoExtension{Renegotiation: tls.RenegotiateOnceAsClient},
+			&tls.SupportedCurvesExtension{Curves: []tls.CurveID{
+				tls.CurveID(0x11ec), // X25519MLKEM768
+				tls.X25519,
+				tls.CurveP256,
+				tls.CurveP384,
+				tls.CurveP521,
+				tls.CurveID(0x0100), // ffdhe2048
+				tls.CurveID(0x0101), // ffdhe3072
+			}},
+			&tls.SupportedPointsExtension{SupportedPoints: []uint8{0}},
+			&tls.SessionTicketExtension{},
+			&tls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
+			&tls.StatusRequestExtension{},
+			&tls.DelegatedCredentialsExtension{},
+			&tls.SCTExtension{},
+			&tls.KeyShareExtension{KeyShares: []tls.KeyShare{
+				{Group: tls.CurveID(0x11ec)}, // X25519MLKEM768
+				{Group: tls.X25519},
+				{Group: tls.CurveP256},
+			}},
+			&tls.SupportedVersionsExtension{Versions: []uint16{
+				tls.VersionTLS13,
+				tls.VersionTLS12,
+			}},
+			&tls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []tls.SignatureScheme{
+				tls.ECDSAWithP256AndSHA256,
+				tls.ECDSAWithP384AndSHA384,
+				tls.ECDSAWithP521AndSHA512,
+				tls.ECDSAWithSHA1, // Legacy
+				tls.PSSWithSHA256,
+				tls.PSSWithSHA384,
+				tls.PSSWithSHA512,
+				tls.PKCS1WithSHA256,
+				tls.PKCS1WithSHA384,
+				tls.PKCS1WithSHA512,
+				tls.PKCS1WithSHA1, // Legacy
+			}},
+			&tls.PSKKeyExchangeModesExtension{Modes: []uint8{1}},    // psk_dhe_ke
+			&tls.GenericExtension{Id: 28, Data: []byte{0x40, 0x01}}, // Record Size Limit (16385)
+			&tls.CompressCertificateExtension{Algorithms: []tls.CertCompressionAlgo{
+				tls.CertCompressionZlib,
+				tls.CertCompressionBrotli,
+				tls.CertCompressionZstd,
+			}},
+		},
+	}
+}
+
+// getFirefox147QUICSpec returns the QUIC/H3 ClientHelloSpec for Firefox 147
+func getFirefox147QUICSpec() *tls.ClientHelloSpec {
+	return &tls.ClientHelloSpec{
+		CipherSuites: []uint16{
+			tls.TLS_AES_128_GCM_SHA256,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_AES_256_GCM_SHA384,
+		},
+		CompressionMethods: []uint8{0},
+		Extensions: []tls.TLSExtension{
+			&tls.ALPNExtension{AlpnProtocols: []string{"h3"}},
+			&tls.SupportedVersionsExtension{Versions: []uint16{
+				tls.VersionTLS13,
+			}},
+			&tls.CompressCertificateExtension{Algorithms: []tls.CertCompressionAlgo{
+				tls.CertCompressionZlib,
+				tls.CertCompressionZstd,
+				tls.CertCompressionBrotli,
+			}},
+			&tls.GenericExtension{Id: 28, Data: []byte{0x40, 0x01}}, // Record Size Limit (16385)
+			&tls.SupportedCurvesExtension{Curves: []tls.CurveID{
+				tls.CurveID(0x11ec), // X25519MLKEM768
+				tls.X25519,
+				tls.CurveP256,
+				tls.CurveP384,
+				tls.CurveP521,
+			}},
+			&tls.KeyShareExtension{KeyShares: []tls.KeyShare{
+				{Group: tls.CurveID(0x11ec)}, // X25519MLKEM768
+				{Group: tls.X25519},
+				{Group: tls.CurveP256},
+			}},
+			&tls.ExtendedMasterSecretExtension{},
+			&tls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []tls.SignatureScheme{
+				tls.ECDSAWithP256AndSHA256,
+				tls.ECDSAWithP384AndSHA384,
+				tls.ECDSAWithP521AndSHA512,
+				tls.ECDSAWithSHA1,
+				tls.PSSWithSHA256,
+				tls.PSSWithSHA384,
+				tls.PSSWithSHA512,
+				tls.PKCS1WithSHA256,
+				tls.PKCS1WithSHA384,
+				tls.PKCS1WithSHA512,
+				tls.PKCS1WithSHA1,
+			}},
+			&tls.PSKKeyExchangeModesExtension{Modes: []uint8{1}}, // psk_dhe_ke
+			&tls.DelegatedCredentialsExtension{},
+			&tls.RenegotiationInfoExtension{Renegotiation: tls.RenegotiateOnceAsClient},
+			// SNI - typically added dynamically or should be here placeholder?
+			// Unlike TCP, QUIC ext order often puts SNI late or first. JSON says late (ID 0).
+			// We'll put it later to match user JSON if possible, but utls often overrides/injects SNI.
+			// Currently utls injects SNI if ServerName is set in Config. Using explicit one here forces order?
+			// We'll add it here to try to force order.
+			&tls.SNIExtension{},
+			&tls.StatusRequestExtension{},
+			&tls.QUICTransportParametersExtension{}, // uTLS handles data injection
+		},
+	}
 }

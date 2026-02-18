@@ -61,17 +61,17 @@ type HTTP2Transport struct {
 
 // persistentConn represents a persistent HTTP/2 connection
 type persistentConn struct {
-	host            string
-	tlsConn         *utls.UConn
-	h2Conn          *http2.ClientConn
-	createdAt       time.Time
-	lastUsedAt      time.Time
-	useCount        int64
-	inFlight        int32 // number of active RoundTrip calls — prevents cleanup during long requests
-	sessionResumed  bool  // True if TLS session was resumed (faster handshake)
-	tlsVersion      uint16
-	cipherSuite     uint16
-	mu              sync.Mutex
+	host           string
+	tlsConn        *utls.UConn
+	h2Conn         *http2.ClientConn
+	createdAt      time.Time
+	lastUsedAt     time.Time
+	useCount       int64
+	inFlight       int32 // number of active RoundTrip calls — prevents cleanup during long requests
+	sessionResumed bool  // True if TLS session was resumed (faster handshake)
+	tlsVersion     uint16
+	cipherSuite    uint16
+	mu             sync.Mutex
 }
 
 // NewHTTP2Transport creates a new HTTP/2 transport with uTLS
@@ -383,16 +383,21 @@ func (t *HTTP2Transport) createConn(ctx context.Context, host, port string) (*pe
 	// utls's ApplyPreset mutates the spec (clears KeyShares.Data, etc.), so each
 	// connection needs its own copy. Use same shuffleSeed for consistent ordering.
 	var specToUse *utls.ClientHelloSpec
-	if t.hasPSKSpec {
-		// Generate fresh PSK spec for this connection
-		if spec, err := utls.UTLSIdToSpecWithSeed(t.preset.PSKClientHelloID, t.shuffleSeed); err == nil {
-			specToUse = &spec
+
+	if t.preset.CustomClientHelloSpec != nil {
+		specToUse = t.preset.CustomClientHelloSpec()
+	} else {
+		if t.hasPSKSpec {
+			// Generate fresh PSK spec for this connection
+			if spec, err := utls.UTLSIdToSpecWithSeed(t.preset.PSKClientHelloID, t.shuffleSeed); err == nil {
+				specToUse = &spec
+			}
 		}
-	}
-	if specToUse == nil {
-		// Generate fresh regular spec
-		if spec, err := utls.UTLSIdToSpecWithSeed(t.preset.ClientHelloID, t.shuffleSeed); err == nil {
-			specToUse = &spec
+		if specToUse == nil {
+			// Generate fresh regular spec
+			if spec, err := utls.UTLSIdToSpecWithSeed(t.preset.ClientHelloID, t.shuffleSeed); err == nil {
+				specToUse = &spec
+			}
 		}
 	}
 

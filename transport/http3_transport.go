@@ -245,21 +245,28 @@ func NewHTTP3TransportWithTransportConfig(preset *fingerprint.Preset, dnsCache *
 	// Get the ClientHelloID for TLS fingerprinting in QUIC
 	// Use QUIC-specific preset if available (different TLS extensions for HTTP/3)
 	var clientHelloID *utls.ClientHelloID
-	if preset.QUICClientHelloID.Client != "" {
-		// Use QUIC-specific ClientHello (proper HTTP/3 fingerprint)
-		clientHelloID = &preset.QUICClientHelloID
-	} else if preset.ClientHelloID.Client != "" {
-		// Fallback to TCP ClientHello if no QUIC-specific one
-		clientHelloID = &preset.ClientHelloID
-	}
 
-	// Cache the ClientHelloSpec for consistent TLS fingerprint across connections
-	// Chrome shuffles TLS extensions once per session, not per connection
-	// Use the shuffle seed for deterministic ordering
-	if clientHelloID != nil {
-		spec, err := utls.UTLSIdToSpecWithSeed(*clientHelloID, shuffleSeed)
-		if err == nil {
-			t.cachedClientHelloSpec = &spec
+	// Check for custom spec first
+	if preset.CustomQUICClientHelloSpec != nil {
+		spec := preset.CustomQUICClientHelloSpec()
+		t.cachedClientHelloSpec = spec
+	} else {
+		if preset.QUICClientHelloID.Client != "" {
+			// Use QUIC-specific ClientHello (proper HTTP/3 fingerprint)
+			clientHelloID = &preset.QUICClientHelloID
+		} else if preset.ClientHelloID.Client != "" {
+			// Fallback to TCP ClientHello if no QUIC-specific one
+			clientHelloID = &preset.ClientHelloID
+		}
+
+		// Cache the ClientHelloSpec for consistent TLS fingerprint across connections
+		// Chrome shuffles TLS extensions once per session, not per connection
+		// Use the shuffle seed for deterministic ordering
+		if clientHelloID != nil {
+			spec, err := utls.UTLSIdToSpecWithSeed(*clientHelloID, shuffleSeed)
+			if err == nil {
+				t.cachedClientHelloSpec = &spec
+			}
 		}
 	}
 
@@ -302,20 +309,20 @@ func NewHTTP3TransportWithTransportConfig(preset *fingerprint.Preset, dnsCache *
 
 	// Create QUIC config with connection reuse settings and TLS fingerprinting
 	t.quicConfig = &quic.Config{
-		MaxIdleTimeout:               quicIdleTimeout,  // Default 30s (Chrome), configurable
-		KeepAlivePeriod:              keepAlivePeriod,  // Half of idle timeout
-		MaxIncomingStreams:           100,
-		MaxIncomingUniStreams:        103, // Chrome uses 103
-		Allow0RTT:                    true,
-		EnableDatagrams:              true,  // Chrome enables QUIC datagrams
-		InitialPacketSize:            1250,  // Chrome uses ~1250
-		DisablePathMTUDiscovery:      false, // Still allow PMTUD for optimal performance
-		DisableClientHelloScrambling: true,  // Chrome doesn't scramble SNI, sends fewer packets
-		ChromeStyleInitialPackets:    true,  // Chrome-like frame patterns in Initial packets
-		ClientHelloID:                 clientHelloID,           // Fallback if cached spec fails
-		CachedClientHelloSpec:         t.cachedClientHelloSpec, // Cached spec for consistent fingerprint
+		MaxIdleTimeout:                quicIdleTimeout, // Default 30s (Chrome), configurable
+		KeepAlivePeriod:               keepAlivePeriod, // Half of idle timeout
+		MaxIncomingStreams:            100,
+		MaxIncomingUniStreams:         103, // Chrome uses 103
+		Allow0RTT:                     true,
+		EnableDatagrams:               true,                               // Chrome enables QUIC datagrams
+		InitialPacketSize:             1250,                               // Chrome uses ~1250
+		DisablePathMTUDiscovery:       false,                              // Still allow PMTUD for optimal performance
+		DisableClientHelloScrambling:  true,                               // Chrome doesn't scramble SNI, sends fewer packets
+		ChromeStyleInitialPackets:     true,                               // Chrome-like frame patterns in Initial packets
+		ClientHelloID:                 clientHelloID,                      // Fallback if cached spec fails
+		CachedClientHelloSpec:         t.cachedClientHelloSpec,            // Cached spec for consistent fingerprint
 		TransportParameterOrder:       quic.TransportParameterOrderChrome, // Chrome transport param ordering with large GREASE IDs
-		TransportParameterShuffleSeed: shuffleSeed, // Consistent transport param shuffle per session
+		TransportParameterShuffleSeed: shuffleSeed,                        // Consistent transport param shuffle per session
 	}
 
 	// Generate GREASE setting ID (must be of form 0x1f * N + 0x21)
@@ -328,24 +335,36 @@ func NewHTTP3TransportWithTransportConfig(preset *fingerprint.Preset, dnsCache *
 	// Safari/iOS: QPACK_MAX_TABLE_CAPACITY=16383 (0x3fff)
 	// Chrome: QPACK_MAX_TABLE_CAPACITY=65536 (0x10000)
 	qpackMaxTableCapacity := uint64(65536) // Chrome default
-	if t.preset != nil && t.preset.HTTP2Settings.NoRFC7540Priorities {
-		// Safari/iOS uses smaller QPACK table
-		qpackMaxTableCapacity = 16383
+	qpackBlockedStreams := uint64(100)     // Chrome/Safari default
+
+	if t.preset != nil {
+		if t.preset.HTTP2Settings.NoRFC7540Priorities {
+			// Safari/iOS uses smaller QPACK table
+			qpackMaxTableCapacity = 16383
+		}
+		if strings.Contains(t.preset.Name, "firefox") {
+			qpackBlockedStreams = 20
+		}
 	}
 
 	// HTTP/3 settings - browser-specific configuration
-	// Chrome sends: QPACK_MAX_TABLE_CAPACITY, MAX_FIELD_SECTION_SIZE, QPACK_BLOCKED_STREAMS, H3_DATAGRAM, GREASE
-	// Safari/iOS sends: QPACK_MAX_TABLE_CAPACITY, QPACK_BLOCKED_STREAMS, GREASE (no MAX_FIELD_SECTION_SIZE or H3_DATAGRAM)
 	additionalSettings := map[uint64]uint64{
-		settingQPACKMaxTableCapacity: qpackMaxTableCapacity, // Browser-specific QPACK table capacity
-		settingQPACKBlockedStreams:   100,                   // Both Chrome and Safari use 100
-		greaseSettingID:              greaseSettingValue,    // GREASE setting
+		settingQPACKMaxTableCapacity: qpackMaxTableCapacity,
+		settingQPACKBlockedStreams:   qpackBlockedStreams,
+		greaseSettingID:              greaseSettingValue, // GREASE setting
 	}
 
 	// Add Chrome-specific settings (not sent by Safari/iOS)
 	if t.preset == nil || !t.preset.HTTP2Settings.NoRFC7540Priorities {
 		additionalSettings[settingMaxFieldSectionSize] = 262144 // Chrome's MAX_FIELD_SECTION_SIZE
 		additionalSettings[settingH3Datagram] = 1               // Chrome enables H3_DATAGRAM
+	}
+
+	// Firefox-specific settings
+	if t.preset != nil && strings.Contains(t.preset.Name, "firefox") {
+		additionalSettings[0x8] = 1        // SETTINGS_ENABLE_CONNECT_PROTOCOL
+		additionalSettings[0xffd277] = 1   // SETTINGS_H3_DATAGRAM_DRAFT04
+		additionalSettings[0x2b603742] = 0 // SETTINGS_WEBTRANS_DRAFT00
 	}
 
 	// Apply localAddr from config
@@ -386,8 +405,8 @@ func NewHTTP3TransportWithTransportConfig(preset *fingerprint.Preset, dnsCache *
 		Dial:                   t.dialQUIC, // Just for DNS resolution
 		EnableDatagrams:        true,       // Chrome enables H3_DATAGRAM
 		AdditionalSettings:     additionalSettings,
-		MaxResponseHeaderBytes: 262144,     // Chrome's MAX_FIELD_SECTION_SIZE
-		SendGreaseFrames:       true,       // Chrome sends GREASE frames on control stream
+		MaxResponseHeaderBytes: 262144, // Chrome's MAX_FIELD_SECTION_SIZE
+		SendGreaseFrames:       true,   // Chrome sends GREASE frames on control stream
 	}
 
 	return t, nil
@@ -452,17 +471,24 @@ func NewHTTP3TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 
 	// Get ClientHelloID for TLS fingerprinting
 	var clientHelloID *utls.ClientHelloID
-	if preset.QUICClientHelloID.Client != "" {
-		clientHelloID = &preset.QUICClientHelloID
-	} else if preset.ClientHelloID.Client != "" {
-		clientHelloID = &preset.ClientHelloID
-	}
 
-	// Cache ClientHelloSpec for consistent fingerprint
-	if clientHelloID != nil {
-		spec, err := utls.UTLSIdToSpecWithSeed(*clientHelloID, shuffleSeed)
-		if err == nil {
-			t.cachedClientHelloSpec = &spec
+	// Check for custom spec first
+	if preset.CustomQUICClientHelloSpec != nil {
+		spec := preset.CustomQUICClientHelloSpec()
+		t.cachedClientHelloSpec = spec
+	} else {
+		if preset.QUICClientHelloID.Client != "" {
+			clientHelloID = &preset.QUICClientHelloID
+		} else if preset.ClientHelloID.Client != "" {
+			clientHelloID = &preset.ClientHelloID
+		}
+
+		// Cache ClientHelloSpec for consistent fingerprint
+		if clientHelloID != nil {
+			spec, err := utls.UTLSIdToSpecWithSeed(*clientHelloID, shuffleSeed)
+			if err == nil {
+				t.cachedClientHelloSpec = &spec
+			}
 		}
 	}
 
@@ -542,13 +568,20 @@ func NewHTTP3TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 
 	// HTTP/3 QPACK settings - Safari/iOS uses different values than Chrome
 	qpackMaxTableCapacity := uint64(65536) // Chrome default
-	if t.preset != nil && t.preset.HTTP2Settings.NoRFC7540Priorities {
-		qpackMaxTableCapacity = 16383 // Safari/iOS uses smaller QPACK table
+	qpackBlockedStreams := uint64(100)     // Chrome/Safari default
+
+	if t.preset != nil {
+		if t.preset.HTTP2Settings.NoRFC7540Priorities {
+			qpackMaxTableCapacity = 16383 // Safari/iOS uses smaller QPACK table
+		}
+		if strings.Contains(t.preset.Name, "firefox") {
+			qpackBlockedStreams = 20
+		}
 	}
 
 	additionalSettings := map[uint64]uint64{
 		settingQPACKMaxTableCapacity: qpackMaxTableCapacity,
-		settingQPACKBlockedStreams:   100,
+		settingQPACKBlockedStreams:   qpackBlockedStreams,
 		greaseSettingID:              greaseSettingValue,
 	}
 
@@ -556,6 +589,13 @@ func NewHTTP3TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 	if t.preset == nil || !t.preset.HTTP2Settings.NoRFC7540Priorities {
 		additionalSettings[settingMaxFieldSectionSize] = 262144 // Chrome's MAX_FIELD_SECTION_SIZE
 		additionalSettings[settingH3Datagram] = 1               // Chrome enables H3_DATAGRAM
+	}
+
+	// Firefox-specific settings
+	if t.preset != nil && strings.Contains(t.preset.Name, "firefox") {
+		additionalSettings[0x8] = 1        // SETTINGS_ENABLE_CONNECT_PROTOCOL
+		additionalSettings[0xffd277] = 1   // SETTINGS_H3_DATAGRAM_DRAFT04
+		additionalSettings[0x2b603742] = 0 // SETTINGS_WEBTRANS_DRAFT00
 	}
 
 	// Create HTTP/3 transport with appropriate dial function
@@ -617,23 +657,34 @@ func NewHTTP3TransportWithMASQUE(preset *fingerprint.Preset, dnsCache *dns.Cache
 
 	// Get ClientHelloID for TLS fingerprinting
 	var clientHelloID *utls.ClientHelloID
-	if preset.QUICClientHelloID.Client != "" {
-		clientHelloID = &preset.QUICClientHelloID
-	} else if preset.ClientHelloID.Client != "" {
-		clientHelloID = &preset.ClientHelloID
-	}
 
-	// Cache ClientHelloSpec for consistent fingerprint (outer connection to proxy)
-	if clientHelloID != nil {
-		spec, err := utls.UTLSIdToSpecWithSeed(*clientHelloID, shuffleSeed)
-		if err == nil {
-			t.cachedClientHelloSpec = &spec
+	// Check for custom spec first
+	if preset.CustomQUICClientHelloSpec != nil {
+		spec := preset.CustomQUICClientHelloSpec()
+		t.cachedClientHelloSpec = spec
+
+		// Create separate cached spec for inner connections
+		innerSpec := preset.CustomQUICClientHelloSpec()
+		t.cachedClientHelloSpecInner = innerSpec
+	} else {
+		if preset.QUICClientHelloID.Client != "" {
+			clientHelloID = &preset.QUICClientHelloID
+		} else if preset.ClientHelloID.Client != "" {
+			clientHelloID = &preset.ClientHelloID
 		}
-		// Create separate cached spec for inner connections (not shared with outer)
-		// This ensures JA4 hash is consistent across inner requests
-		innerSpec, err := utls.UTLSIdToSpecWithSeed(*clientHelloID, shuffleSeed)
-		if err == nil {
-			t.cachedClientHelloSpecInner = &innerSpec
+
+		// Cache ClientHelloSpec for consistent fingerprint (outer connection to proxy)
+		if clientHelloID != nil {
+			spec, err := utls.UTLSIdToSpecWithSeed(*clientHelloID, shuffleSeed)
+			if err == nil {
+				t.cachedClientHelloSpec = &spec
+			}
+			// Create separate cached spec for inner connections (not shared with outer)
+			// This ensures JA4 hash is consistent across inner requests
+			innerSpec, err := utls.UTLSIdToSpecWithSeed(*clientHelloID, shuffleSeed)
+			if err == nil {
+				t.cachedClientHelloSpecInner = &innerSpec
+			}
 		}
 	}
 
@@ -712,13 +763,20 @@ func NewHTTP3TransportWithMASQUE(preset *fingerprint.Preset, dnsCache *dns.Cache
 
 	// HTTP/3 QPACK settings - Safari/iOS uses different values than Chrome
 	qpackMaxTableCapacityMASQUE := uint64(65536) // Chrome default
-	if t.preset != nil && t.preset.HTTP2Settings.NoRFC7540Priorities {
-		qpackMaxTableCapacityMASQUE = 16383 // Safari/iOS uses smaller QPACK table
+	qpackBlockedStreams := uint64(100)           // Chrome/Safari default
+
+	if t.preset != nil {
+		if t.preset.HTTP2Settings.NoRFC7540Priorities {
+			qpackMaxTableCapacityMASQUE = 16383 // Safari/iOS uses smaller QPACK table
+		}
+		if strings.Contains(t.preset.Name, "firefox") {
+			qpackBlockedStreams = 20
+		}
 	}
 
 	additionalSettings := map[uint64]uint64{
 		settingQPACKMaxTableCapacity: qpackMaxTableCapacityMASQUE,
-		settingQPACKBlockedStreams:   100,
+		settingQPACKBlockedStreams:   qpackBlockedStreams,
 		greaseSettingID:              greaseSettingValue,
 	}
 
@@ -726,6 +784,13 @@ func NewHTTP3TransportWithMASQUE(preset *fingerprint.Preset, dnsCache *dns.Cache
 	if t.preset == nil || !t.preset.HTTP2Settings.NoRFC7540Priorities {
 		additionalSettings[settingMaxFieldSectionSize] = 262144 // Chrome's MAX_FIELD_SECTION_SIZE
 		additionalSettings[settingH3Datagram] = 1               // Chrome enables H3_DATAGRAM
+	}
+
+	// Firefox-specific settings
+	if t.preset != nil && strings.Contains(t.preset.Name, "firefox") {
+		additionalSettings[0x8] = 1        // SETTINGS_ENABLE_CONNECT_PROTOCOL
+		additionalSettings[0xffd277] = 1   // SETTINGS_H3_DATAGRAM_DRAFT04
+		additionalSettings[0x2b603742] = 0 // SETTINGS_WEBTRANS_DRAFT00
 	}
 
 	// Create HTTP/3 transport with MASQUE dial function
@@ -824,24 +889,24 @@ func (t *HTTP3Transport) dialQUICWithMASQUE(ctx context.Context, addr string, tl
 	keepAlivePeriod := quicIdleTimeout / 2
 
 	cfgCopy := &quic.Config{
-		MaxIdleTimeout:                  quicIdleTimeout,
-		KeepAlivePeriod:                 keepAlivePeriod,
-		MaxIncomingStreams:              100,
-		MaxIncomingUniStreams:           103,
-		Allow0RTT:                       true,
-		EnableDatagrams:                 true,
-		InitialPacketSize:               1200,
-		DisablePathMTUDiscovery:         true, // Disable PMTUD through tunnel
-		DisableClientHelloScrambling:    true, // Chrome doesn't scramble, simplifies tunnel handshake
-		InitialStreamReceiveWindow:      512 * 1024,
-		MaxStreamReceiveWindow:          6 * 1024 * 1024,
-		InitialConnectionReceiveWindow:  15 * 1024 * 1024 / 2,
-		MaxConnectionReceiveWindow:      15 * 1024 * 1024,
-		TransportParameterOrder:         quic.TransportParameterOrderChrome,
-		TransportParameterShuffleSeed:   t.shuffleSeed,
-		ClientHelloID:                   clientHelloID,
-		CachedClientHelloSpec:           innerSpec, // Separate spec for consistent JA4, uses PSK for resumed
-		ECHConfigList:                   echConfigList,
+		MaxIdleTimeout:                 quicIdleTimeout,
+		KeepAlivePeriod:                keepAlivePeriod,
+		MaxIncomingStreams:             100,
+		MaxIncomingUniStreams:          103,
+		Allow0RTT:                      true,
+		EnableDatagrams:                true,
+		InitialPacketSize:              1200,
+		DisablePathMTUDiscovery:        true, // Disable PMTUD through tunnel
+		DisableClientHelloScrambling:   true, // Chrome doesn't scramble, simplifies tunnel handshake
+		InitialStreamReceiveWindow:     512 * 1024,
+		MaxStreamReceiveWindow:         6 * 1024 * 1024,
+		InitialConnectionReceiveWindow: 15 * 1024 * 1024 / 2,
+		MaxConnectionReceiveWindow:     15 * 1024 * 1024,
+		TransportParameterOrder:        quic.TransportParameterOrderChrome,
+		TransportParameterShuffleSeed:  t.shuffleSeed,
+		ClientHelloID:                  clientHelloID,
+		CachedClientHelloSpec:          innerSpec, // Separate spec for consistent JA4, uses PSK for resumed
+		ECHConfigList:                  echConfigList,
 	}
 
 	// Dial QUIC over the MASQUE tunnel using quic.DialEarly for 0-RTT support
@@ -1570,15 +1635,15 @@ func (t *HTTP3Transport) Connect(ctx context.Context, host, port string) error {
 
 	// QUIC config with Chrome-like settings and ECH
 	quicCfg := &quic.Config{
-		MaxIdleTimeout:                  quicIdleTimeout,
-		KeepAlivePeriod:                 keepAlivePeriod,
+		MaxIdleTimeout:                 quicIdleTimeout,
+		KeepAlivePeriod:                keepAlivePeriod,
 		InitialStreamReceiveWindow:     512 * 1024,
 		MaxStreamReceiveWindow:         6 * 1024 * 1024,
 		InitialConnectionReceiveWindow: 15 * 1024 * 1024 / 2,
 		MaxConnectionReceiveWindow:     15 * 1024 * 1024,
 		ECHConfigList:                  echConfigList,
 		TransportParameterOrder:        quic.TransportParameterOrderChrome, // Chrome transport param ordering
-		TransportParameterShuffleSeed:  t.shuffleSeed, // Consistent transport param shuffle per session
+		TransportParameterShuffleSeed:  t.shuffleSeed,                      // Consistent transport param shuffle per session
 	}
 
 	// Try to establish QUIC connection

@@ -49,6 +49,7 @@ func TestAvailableWithInfo(t *testing.T) {
 		"chrome-144", "chrome-144-windows", "chrome-144-linux", "chrome-144-macos",
 		"safari-18", "ios-chrome-143", "ios-chrome-144",
 		"ios-safari-18", "android-chrome-143", "android-chrome-144",
+		"firefox-147",
 	}
 	for _, name := range h3Presets {
 		pi, ok := info[name]
